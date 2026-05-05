@@ -112,6 +112,5 @@ Veja `requirements.txt` para a lista completa. Principais bibliotecas:
 
 ## Observações
 
-- O firmware contém a linha `sensorPosition += 0.001;` no `loop()` apenas para fins de teste. **Substitua pelo código real de leitura do sensor antes de usar em produção.**
 - A interface aguarda até 5 segundos pela mensagem `"System ready."` do Arduino ao conectar. Se o timeout for atingido, a conexão é assumida como bem-sucedida mesmo assim.
 - O buffer serial é drenado a cada ciclo de leitura para evitar acúmulo de pacotes antigos.
