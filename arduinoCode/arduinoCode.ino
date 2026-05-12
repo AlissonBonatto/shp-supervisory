@@ -52,10 +52,8 @@ float interpolate(float x, float in_min, float in_max, float out_min, float out_
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-/**
- * Writes the desired voltage to the PWM pin using piecewise linear interpolation.
- * @param dc Normalized value (0.0 for 0V, 1.0 for 10V).
- */
+//Writes the desired voltage to the PWM pin using piecewise linear interpolation.
+
 void writePWM(float dc) {
   // Target voltage based on 0.0-1.0 scale
   float targetV = dc * 10.0;
