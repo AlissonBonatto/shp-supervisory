@@ -1,4 +1,6 @@
 #define LED_PIN 13
+#define PWM_PIN 5
+#define SENSOR_PIN A3
 #define BLINK_COUNT 3
 
 // Control values
@@ -21,6 +23,9 @@ const long interval = 250;
 void setup() {
   // Defining builtin led as output for debug pourposes
   pinMode(LED_PIN, OUTPUT);
+  // Defining output and input of control system
+  pinMode(PWM_PIN, OUTPUT);
+  pinMode(SENSOR_PIN, INPUT);
 
   // Serial config
   Serial.begin(9600);
@@ -32,8 +37,73 @@ void loop() {
   // Parses incoming data and sends data through serial port
   serialRoutine();
 
-  // PID Routine bellow
-  sensorPosition += 0.001; // Apenas de teste, excluir dps
+  // *** PID Routine bellow ***
+
+  // Reading sensor
+  updateSensorPosition();
+
+  // Writing in output
+  writePWM(kd);
+}
+
+
+// Helper function for float mapping
+float interpolate(float x, float in_min, float in_max, float out_min, float out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+/**
+ * Writes the desired voltage to the PWM pin using piecewise linear interpolation.
+ * @param dc Normalized value (0.0 for 0V, 1.0 for 10V).
+ */
+void writePWM(float dc) {
+  // Target voltage based on 0.0-1.0 scale
+  float targetV = dc * 10.0;
+  float pwmValue = 0;
+
+  // Inverse mapping based on user-provided table (Voltage -> PWM)
+  if (targetV <= 0.0) {
+    pwmValue = 0;
+  } else if (targetV <= 1.16) {
+    pwmValue = interpolate(targetV, 0.0, 1.16, 0.0, 12.75);
+  } else if (targetV <= 1.82) {
+    pwmValue = interpolate(targetV, 1.16, 1.82, 12.75, 25.5);
+  } else if (targetV <= 3.06) {
+    pwmValue = interpolate(targetV, 1.82, 3.06, 25.5, 51.0);
+  } else if (targetV <= 3.62) {
+    pwmValue = interpolate(targetV, 3.06, 3.62, 51.0, 63.75);
+  } else if (targetV <= 4.14) {
+    pwmValue = interpolate(targetV, 3.62, 4.14, 63.75, 76.5);
+  } else if (targetV <= 5.19) {
+    pwmValue = interpolate(targetV, 4.14, 5.19, 76.5, 102.0);
+  } else if (targetV <= 6.12) {
+    pwmValue = interpolate(targetV, 5.19, 6.12, 102.0, 127.5);
+  } else if (targetV <= 7.01) {
+    pwmValue = interpolate(targetV, 6.12, 7.01, 127.5, 153.0);
+  } else if (targetV <= 7.80) {
+    pwmValue = interpolate(targetV, 7.01, 7.80, 153.0, 178.5);
+  } else if (targetV <= 8.22) {
+    pwmValue = interpolate(targetV, 7.80, 8.22, 178.5, 191.25);
+  } else if (targetV <= 8.57) {
+    pwmValue = interpolate(targetV, 8.22, 8.57, 191.25, 204.0);
+  } else if (targetV <= 9.26) {
+    pwmValue = interpolate(targetV, 8.57, 9.26, 204.0, 229.5);
+  } else if (targetV <= 9.77) {
+    pwmValue = interpolate(targetV, 9.26, 9.77, 229.5, 255.0);
+  } else {
+    // Hardware saturation limit: 9.77V is the maximum measured output
+    pwmValue = 255.0;
+  }
+
+  // Write finalized 8-bit value to the pin
+  analogWrite(PWM_PIN, (int)constrain(pwmValue, 0, 255));
+}
+
+
+// Updates global variable sensorPosition based on analogRead on SENSOR_PIN
+void updateSensorPosition(){
+  int sensorValue = analogRead(SENSOR_PIN); // Read 0-1023 (0-5V)
+  sensorPosition = (float) map(sensorValue, 0, 1023, 0, 2500)/100; // Transforms 0-1023 into 0-250mm
 }
 
 
