@@ -1,6 +1,7 @@
 #define LED_PIN 13
 #define PWM_PIN 5
 #define SENSOR_PIN A3
+#define CONTROL_READ_PIN A0
 #define BLINK_COUNT 3
 
 // Control values
@@ -9,6 +10,7 @@ float kp = 0.0;
 float ki = 0.0;
 float kd = 0.0;
 float sensorPosition = 12.5;
+float controlSignalV = 0.0; 
 
 // Serial incoming data
 String incomingData = "";
@@ -21,28 +23,25 @@ const long interval = 250;
 
 
 void setup() {
-  // Defining builtin led as output for debug pourposes
   pinMode(LED_PIN, OUTPUT);
-  // Defining output and input of control system
   pinMode(PWM_PIN, OUTPUT);
   pinMode(SENSOR_PIN, INPUT);
+  pinMode(CONTROL_READ_PIN, INPUT);
 
-  // Serial config
   Serial.begin(9600);
   Serial.println("System ready.");
 }
 
 
 void loop() {
-  // Parses incoming data and sends data through serial port
   serialRoutine();
 
   // *** PID Routine bellow ***
 
-  // Reading sensor
   updateSensorPosition();
+  updateControlSignal();   // Lê o sinal de controle em A0
 
-  // Writing in output
+  // writePWM recebe kd como debug
   writePWM(kd);
 }
 
@@ -52,14 +51,11 @@ float interpolate(float x, float in_min, float in_max, float out_min, float out_
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-//Writes the desired voltage to the PWM pin using piecewise linear interpolation.
-
+// Writes the desired voltage to the PWM pin using piecewise linear interpolation.
 void writePWM(float dc) {
-  // Target voltage based on 0.0-1.0 scale
   float targetV = dc * 10.0;
   float pwmValue = 0;
 
-  // Inverse mapping based on user-provided table (Voltage -> PWM)
   if (targetV <= 0.0) {
     pwmValue = 0;
   } else if (targetV <= 1.16) {
@@ -89,47 +85,52 @@ void writePWM(float dc) {
   } else if (targetV <= 9.77) {
     pwmValue = interpolate(targetV, 9.26, 9.77, 229.5, 255.0);
   } else {
-    // Hardware saturation limit: 9.77V is the maximum measured output
     pwmValue = 255.0;
   }
 
-  // Write finalized 8-bit value to the pin
   analogWrite(PWM_PIN, (int)constrain(pwmValue, 0, 255));
 }
 
 
 // Updates global variable sensorPosition based on analogRead on SENSOR_PIN
-void updateSensorPosition(){
-  int sensorValue = analogRead(SENSOR_PIN); // Read 0-1023 (0-5V)
-  sensorPosition = (float) map(sensorValue, 0, 1023, 0, 2500)/100; // Transforms 0-1023 into 0-250mm
+void updateSensorPosition() {
+  int sensorValue = analogRead(SENSOR_PIN);                          // 0–1023
+  sensorPosition = (float) map(sensorValue, 0, 1023, 0, 2500) / 100; // 0–25 cm
+}
+
+
+// Reads the control signal from CONTROL_READ_PIN and converts to Volts (0–5 V)
+void updateControlSignal() {
+  int rawValue = analogRead(CONTROL_READ_PIN);         // 0–1023
+  controlSignalV = (float)rawValue * 5.0 / 1023.0;    // 0.0–5.0 V
 }
 
 
 // Receives and sends data through serial port
-void serialRoutine(){
-  // Receives serial data
+void serialRoutine() {
   if (Serial.available() > 0) {
-    // Reads the incoming string from serial port until '\n'
     incomingData = Serial.readStringUntil('\n');
-    // Parses incoming packet, i.e., updates targetSetpoint, kp, ki and kd
-    if (parseIncomingPacket(incomingData)){
-      // Debug via led. Blinks LED_PIN BLINK_COUNT times
+    if (parseIncomingPacket(incomingData)) {
       startBlinking();
     }
   }
 
-  // Sends serial data
-  Serial.println(sensorPosition);
-  updateBlink(); // Debug via led
+  // Sends position (Y) e control signal (U) in the format "Y:<val>;U:<val>"
+  Serial.print("Y:");
+  Serial.print(sensorPosition, 2);
+  Serial.print(";U:");
+  Serial.println(controlSignalV, 3);
+
+  updateBlink();
 }
 
 
 // Parses incoming packet, updating setpoint and PID gains
 bool parseIncomingPacket(String packet) {
   int indexSP = packet.indexOf("SP:");
-  int indexP = packet.indexOf(";P:");
-  int indexI = packet.indexOf(";I:");
-  int indexD = packet.indexOf(";D:");
+  int indexP  = packet.indexOf(";P:");
+  int indexI  = packet.indexOf(";I:");
+  int indexD  = packet.indexOf(";D:");
 
   if (indexSP == -1 || indexP == -1 || indexI == -1 || indexD == -1) {
     return false;
@@ -144,7 +145,7 @@ bool parseIncomingPacket(String packet) {
 }
 
 
-// Blinks led. Debug pourposes
+// Blinks led — debug purposes
 void startBlinking() {
   if (!isBlinking) {
     isBlinking = true;
@@ -157,16 +158,12 @@ void startBlinking() {
 void updateBlink() {
   if (isBlinking) {
     unsigned long currentMillis = millis();
-
     if (currentMillis - previousMillis >= interval) {
       previousMillis = currentMillis;
-
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-      
       if (digitalRead(LED_PIN) == LOW) {
         blinkCount++;
       }
-
       if (blinkCount >= 3) {
         isBlinking = false;
         digitalWrite(LED_PIN, LOW);

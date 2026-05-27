@@ -191,6 +191,7 @@ class ArduinoController:
         self.setpoint = INITIAL_SETPOINT
         self.p, self.i, self.d = 12.5, 0.85, 2.1
         self.last_pos = 0.0
+        self.last_control = 0.0  # Sinal de controle U em Volts (0–5V)
 
     def connect(self, porta):
         try:
@@ -199,7 +200,6 @@ class ArduinoController:
             timeout_start = time.time()
             while "system ready" not in line.lower():
                 if time.time() - timeout_start > 5:
-                    # Timeout after 5s — assume connected anyway
                     break
                 raw = self.ser.readline()
                 if raw:
@@ -236,27 +236,45 @@ class ArduinoController:
             print("Error: serial port not open.")
 
     def receive_command(self):
+        """
+        Lê todas as linhas disponíveis no buffer serial.
+        Espera o formato: Y:<posicao>;U:<controle>
+        Retorna (posição, setpoint, erro, sinal_controle_V).
+        """
         if self.ser and self.ser.is_open:
             while self.ser.in_waiting > 0:
                 try:
                     line = self.ser.readline().decode('utf-8').strip()
-                    if line:
+                    if not line:
+                        continue
+
+                    # Tenta parsear o novo formato "Y:<val>;U:<val>"
+                    if "Y:" in line and "U:" in line:
+                        idx_y = line.index("Y:")
+                        idx_u = line.index(";U:")
+                        y_str = line[idx_y + 2 : idx_u]
+                        u_str = line[idx_u + 3 :]
+                        self.last_pos = float(y_str)
+                        self.last_control = float(u_str)
+                    else:
+                        # Fallback: linha só com a posição (formato legado)
                         self.last_pos = float(line)
+
                 except Exception:
                     pass
-        
+
         error = self.setpoint - self.last_pos
-        return self.last_pos, self.setpoint, error
+        return self.last_pos, self.setpoint, error, self.last_control
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Supervisório Atuador Pneumático")
-        self.resize(1280, 700)
+        self.resize(1280, 780)
         self.setStyleSheet(STYLESHEET)
         
-        self.history = {"time": [], "pos": [], "setpoint": [], "error": []}
+        self.history = {"time": [], "pos": [], "setpoint": [], "error": [], "control": []}
         self.start_time = time.time()
         self.is_running = False
         self.sliding_window_enabled = True
@@ -267,7 +285,7 @@ class MainWindow(QMainWindow):
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_simulation)
-        self.timer.start(50)  # 20Hz
+        self.timer.start(50)  # 20 Hz
         
     def init_ui(self):
         main_widget = QWidget()
@@ -297,7 +315,6 @@ class MainWindow(QMainWindow):
             
         sidebar_layout.addStretch()
 
-        # Connection status indicator in sidebar
         self.sidebar_status_label = QLabel("● DESCONECTADO")
         self.sidebar_status_label.setStyleSheet(f"color: {ACCENT_ROSE}; font-size: 10px; font-weight: bold; padding: 0 20px 12px;")
         sidebar_layout.addWidget(self.sidebar_status_label)
@@ -307,7 +324,7 @@ class MainWindow(QMainWindow):
         self.start_stop_btn.setFixedWidth(180)
         self.start_stop_btn.setStyleSheet(f"margin: 0 15px; padding: 15px; text-align: center;")
         self.start_stop_btn.clicked.connect(self.toggle_reading)
-        self.start_stop_btn.setEnabled(False)  # Disabled until connected
+        self.start_stop_btn.setEnabled(False)
         sidebar_layout.addWidget(self.start_stop_btn)
         
         layout.addWidget(sidebar)
@@ -325,6 +342,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(20)
         
+        # Header
         header_layout = QHBoxLayout()
         header = QLabel("Supervisório e Controle")
         header.setStyleSheet("font-size: 22px; font-weight: 600;")
@@ -335,13 +353,12 @@ class MainWindow(QMainWindow):
         export_btn.setFixedWidth(180)
         export_btn.clicked.connect(self.export_csv)
         header_layout.addWidget(export_btn)
-        
         layout.addLayout(header_layout)
         
         grid = QHBoxLayout()
         grid.setSpacing(20)
         
-        # --- Left Column ---
+        # ── Left column ──────────────────────────────────────────────────────
         ctrl_panel = QVBoxLayout()
         ctrl_panel.setSpacing(20)
         
@@ -350,28 +367,20 @@ class MainWindow(QMainWindow):
         sp_card.setObjectName("Card")
         sp_card.setFixedWidth(300)
         sp_layout = QVBoxLayout(sp_card)
-        
         sp_layout.addWidget(QLabel("CONTROLE DE SETPOINT", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
         sp_layout.addSpacing(10)
-        
-        label = QLabel("Posição Alvo (cm)")
-        label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
-        sp_layout.addWidget(label)
-        
+        sp_layout.addWidget(QLabel("Posição Alvo (cm)", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 11px;"))
         self.sp_input = QLineEdit(str(INITIAL_SETPOINT))
         sp_layout.addWidget(self.sp_input)
-        
         self.sp_slider = QSlider(Qt.Horizontal)
         self.sp_slider.setRange(0, 25)
         self.sp_slider.setValue(int(INITIAL_SETPOINT))
         self.sp_slider.valueChanged.connect(self.on_slider_change)
         sp_layout.addWidget(self.sp_slider)
-        
         send_btn = QPushButton("Enviar Setpoint")
         send_btn.setObjectName("ActionBtn")
         send_btn.clicked.connect(self.on_send_setpoint)
         sp_layout.addWidget(send_btn)
-        
         ctrl_panel.addWidget(sp_card)
         
         # PID Card
@@ -379,49 +388,55 @@ class MainWindow(QMainWindow):
         pid_card.setObjectName("Card")
         pid_card.setFixedWidth(300)
         pid_layout = QVBoxLayout(pid_card)
-        
         pid_layout.addWidget(QLabel("PARÂMETROS PID", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
         pid_layout.addSpacing(10)
-        
         self.kp_input = QLineEdit("12.5")
         self.ki_input = QLineEdit("0.85")
         self.kd_input = QLineEdit("2.1")
-        
         for label_text, input_widget in [("Kp", self.kp_input), ("Ki", self.ki_input), ("Kd", self.kd_input)]:
             pid_layout.addWidget(QLabel(label_text, styleSheet=f"color: {TEXT_SECONDARY}; font-size: 11px;"))
             pid_layout.addWidget(input_widget)
-            
         update_btn = QPushButton("Atualizar Ganhos")
         update_btn.setObjectName("ActionBtn")
         update_btn.clicked.connect(self.on_update_pid)
         pid_layout.addWidget(update_btn)
-        
         ctrl_panel.addWidget(pid_card)
         
-        # Current Value Display
+        # Current values display (posição + sinal de controle)
         val_card = QFrame()
         val_card.setObjectName("Card")
         val_card.setFixedWidth(300)
         val_layout = QVBoxLayout(val_card)
-        self.pos_val_label = QLabel("0.0cm")
-        self.pos_val_label.setStyleSheet("font-size: 32px; font-weight: 200; text-align: center;")
+
+        self.pos_val_label = QLabel("0.0 cm")
+        self.pos_val_label.setStyleSheet("font-size: 28px; font-weight: 200;")
         self.pos_val_label.setAlignment(Qt.AlignCenter)
         val_layout.addWidget(self.pos_val_label)
-        val_layout.addWidget(QLabel("POSIÇÃO ATUAL", alignment=Qt.AlignCenter, styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px;"))
+        val_layout.addWidget(QLabel("POSIÇÃO ATUAL", alignment=Qt.AlignCenter,
+                                    styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px;"))
+
+        val_layout.addSpacing(8)
+
+        self.ctrl_val_label = QLabel("0.00 V")
+        self.ctrl_val_label.setStyleSheet(f"font-size: 28px; font-weight: 200; color: {ACCENT_AMBER};")
+        self.ctrl_val_label.setAlignment(Qt.AlignCenter)
+        val_layout.addWidget(self.ctrl_val_label)
+        val_layout.addWidget(QLabel("SINAL DE CONTROLE", alignment=Qt.AlignCenter,
+                                    styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px;"))
+
         ctrl_panel.addWidget(val_card)
-        
         ctrl_panel.addStretch()
         grid.addLayout(ctrl_panel)
         
-        # --- Right Column ---
+        # ── Right column ─────────────────────────────────────────────────────
         right_panel = QVBoxLayout()
         right_panel.setSpacing(20)
         
+        # Linear visualiser
         vis_card = QFrame()
         vis_card.setObjectName("Card")
         vis_layout = QVBoxLayout(vis_card)
         vis_layout.addWidget(QLabel("VISUALIZADOR LINEAR", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
-        
         self.linear_vis = pg.PlotWidget()
         self.linear_vis.setBackground(None)
         self.linear_vis.setXRange(0, 25)
@@ -432,23 +447,25 @@ class MainWindow(QMainWindow):
         self.linear_vis.setFixedHeight(70)
         self.linear_vis.setMouseEnabled(x=False, y=False)
         self.linear_vis.setMenuEnabled(False)
-        
         self.pos_marker = pg.ScatterPlotItem(size=15, pen=pg.mkPen(None), brush=pg.mkBrush(ACCENT_CYAN))
-        self.sp_line = pg.InfiniteLine(pos=INITIAL_SETPOINT, angle=90, pen=pg.mkPen(ACCENT_ROSE, width=2, style=Qt.DashLine))
+        self.sp_line = pg.InfiniteLine(pos=INITIAL_SETPOINT, angle=90,
+                                       pen=pg.mkPen(ACCENT_ROSE, width=2, style=Qt.DashLine))
         self.linear_vis.addItem(self.pos_marker)
         self.linear_vis.addItem(self.sp_line)
         vis_layout.addWidget(self.linear_vis)
         right_panel.addWidget(vis_card)
         
+        # ── Position history plot ────────────────────────────────────────────
         graph_card = QFrame()
         graph_card.setObjectName("Card")
         graph_layout = QVBoxLayout(graph_card)
         
         graph_header = QHBoxLayout()
-        graph_header.addWidget(QLabel("HISTÓRICO DE POSIÇÃO", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
-        
+        graph_header.addWidget(QLabel("HISTÓRICO DE POSIÇÃO",
+                                      styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
         self.window_toggle_super = QPushButton("JANELA DESLIZANTE: ON")
-        self.window_toggle_super.setStyleSheet(f"color: {ACCENT_CYAN}; font-size: 10px; font-weight: bold; border: 1px solid {BORDER}; padding: 4px;")
+        self.window_toggle_super.setStyleSheet(
+            f"color: {ACCENT_CYAN}; font-size: 10px; font-weight: bold; border: 1px solid {BORDER}; padding: 4px;")
         self.window_toggle_super.setFixedWidth(150)
         self.window_toggle_super.clicked.connect(self.toggle_sliding_window)
         graph_header.addWidget(self.window_toggle_super)
@@ -460,12 +477,35 @@ class MainWindow(QMainWindow):
         self.plot_super.setYRange(0, 25)
         self.plot_super.getAxis('left').setLabel("Posição", units="cm")
         self.plot_super.getAxis('bottom').setLabel("Tempo", units="s")
-        
         self.curve_pos = self.plot_super.plot(pen=pg.mkPen(ACCENT_CYAN, width=2), name="Posição")
-        self.curve_sp = self.plot_super.plot(pen=pg.mkPen(ACCENT_ROSE, width=1, style=Qt.DashLine), name="Setpoint")
+        self.curve_sp  = self.plot_super.plot(pen=pg.mkPen(ACCENT_ROSE, width=1, style=Qt.DashLine), name="Setpoint")
         graph_layout.addWidget(self.plot_super)
         right_panel.addWidget(graph_card, 1)
-        
+
+        # ── Control signal plot ──────────────────────────────────────────────
+        ctrl_graph_card = QFrame()
+        ctrl_graph_card.setObjectName("Card")
+        ctrl_graph_layout = QVBoxLayout(ctrl_graph_card)
+
+        ctrl_graph_layout.addWidget(QLabel("SINAL DE CONTROLE (U)",
+                                           styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold;"))
+
+        self.plot_ctrl = pg.PlotWidget()
+        self.plot_ctrl.setBackground(None)
+        self.plot_ctrl.showGrid(x=True, y=True, alpha=0.1)
+        self.plot_ctrl.setYRange(0, 5)
+        self.plot_ctrl.getAxis('left').setLabel("Tensão", units="V")
+        self.plot_ctrl.getAxis('bottom').setLabel("Tempo", units="s")
+        # Horizontal reference lines at 0 V and 5 V
+        self.plot_ctrl.addItem(pg.InfiniteLine(pos=0, angle=0,
+                                               pen=pg.mkPen(BORDER, width=1)))
+        self.plot_ctrl.addItem(pg.InfiniteLine(pos=5, angle=0,
+                                               pen=pg.mkPen(BORDER, width=1)))
+        self.curve_ctrl = self.plot_ctrl.plot(pen=pg.mkPen(ACCENT_AMBER, width=2), name="U (V)")
+
+        ctrl_graph_layout.addWidget(self.plot_ctrl)
+        right_panel.addWidget(ctrl_graph_card, 1)
+
         grid.addLayout(right_panel, 1)
         layout.addLayout(grid)
         self.stack.addWidget(view)
@@ -484,19 +524,15 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(20)
         content_layout.setAlignment(Qt.AlignTop)
 
-        # --- Serial Connection Card ---
         serial_card = QFrame()
         serial_card.setObjectName("Card")
         serial_card.setFixedWidth(420)
         serial_layout = QVBoxLayout(serial_card)
         serial_layout.setSpacing(14)
 
-        serial_layout.addWidget(QLabel(
-            "CONEXÃO SERIAL",
-            styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold; letter-spacing: 1px;"
-        ))
+        serial_layout.addWidget(QLabel("CONEXÃO SERIAL",
+            styleSheet=f"color: {TEXT_SECONDARY}; font-size: 10px; font-weight: bold; letter-spacing: 1px;"))
 
-        # Status badge
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("Status:", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 12px;"))
         self.connection_status_label = QLabel("● Desconectado")
@@ -505,23 +541,18 @@ class MainWindow(QMainWindow):
         status_row.addStretch()
         serial_layout.addLayout(status_row)
 
-        # Port info (shows connected port name)
         self.connected_port_label = QLabel("")
         self.connected_port_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px; font-family: 'JetBrains Mono', monospace;")
         serial_layout.addWidget(self.connected_port_label)
 
-        serial_layout.addWidget(QLabel(
-            "Portas COM disponíveis:",
-            styleSheet=f"color: {TEXT_SECONDARY}; font-size: 11px;"
-        ))
+        serial_layout.addWidget(QLabel("Portas COM disponíveis:",
+            styleSheet=f"color: {TEXT_SECONDARY}; font-size: 11px;"))
 
-        # COM port list
         self.port_list = QListWidget()
         self.port_list.setFixedHeight(180)
         self.port_list.setSelectionMode(QAbstractItemView.SingleSelection)
         serial_layout.addWidget(self.port_list)
 
-        # Refresh + action buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
@@ -543,7 +574,6 @@ class MainWindow(QMainWindow):
 
         serial_layout.addLayout(btn_row)
 
-        # Baud rate info (read-only)
         baud_row = QHBoxLayout()
         baud_row.addWidget(QLabel("Baud Rate:", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 11px;"))
         baud_label = QLabel("9600")
@@ -558,11 +588,9 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         self.stack.addWidget(view)
-
-        # Populate port list on startup
         self.refresh_ports()
 
-    # --- Config Slots ---
+    # ── Config slots ─────────────────────────────────────────────────────────
 
     def refresh_ports(self):
         self.port_list.clear()
@@ -571,7 +599,7 @@ class MainWindow(QMainWindow):
             for port in sorted(ports):
                 item_text = f"{port.device}   —   {port.description}"
                 item = QListWidgetItem(item_text)
-                item.setData(Qt.UserRole, port.device)  # Store raw port name
+                item.setData(Qt.UserRole, port.device)
                 self.port_list.addItem(item)
             self.port_list.setCurrentRow(0)
         else:
@@ -588,13 +616,12 @@ class MainWindow(QMainWindow):
         port_name = selected.data(Qt.UserRole)
         if not port_name:
             return
-
         success = self.serialArduino.connect(port_name)
         self._update_connection_ui(success, port_name)
 
     def on_disconnect(self):
         if self.is_running:
-            self.toggle_reading()  # Stop reading before disconnecting
+            self.toggle_reading()
         self.serialArduino.disconnect()
         self._update_connection_ui(connected=False)
 
@@ -618,18 +645,20 @@ class MainWindow(QMainWindow):
             self.sidebar_status_label.setText("● DESCONECTADO")
             self.sidebar_status_label.setStyleSheet(f"color: {ACCENT_ROSE}; font-size: 10px; font-weight: bold; padding: 0 20px 12px;")
 
-    # --- General Slots ---
+    # ── General slots ─────────────────────────────────────────────────────────
 
     def toggle_reading(self):
         if not self.is_running:
             self.reset_data()
             self.is_running = True
             self.start_stop_btn.setText("PARAR LEITURA")
-            self.start_stop_btn.setStyleSheet(f"margin: 0 15px; padding: 15px; text-align: center; background-color: {ACCENT_ROSE}; color: white;")
+            self.start_stop_btn.setStyleSheet(
+                f"margin: 0 15px; padding: 15px; text-align: center; background-color: {ACCENT_ROSE}; color: white;")
         else:
             self.is_running = False
             self.start_stop_btn.setText("INICIAR LEITURA")
-            self.start_stop_btn.setStyleSheet(f"margin: 0 15px; padding: 15px; text-align: center; background-color: {ACCENT_CYAN}; color: {BG_DEEP};")
+            self.start_stop_btn.setStyleSheet(
+                f"margin: 0 15px; padding: 15px; text-align: center; background-color: {ACCENT_CYAN}; color: {BG_DEEP};")
 
     def toggle_sliding_window(self):
         self.sliding_window_enabled = not self.sliding_window_enabled
@@ -637,6 +666,7 @@ class MainWindow(QMainWindow):
         self.window_toggle_super.setText(txt)
         if not self.sliding_window_enabled:
             self.plot_super.enableAutoRange(axis='x', enable=True)
+            self.plot_ctrl.enableAutoRange(axis='x', enable=True)
 
     def switch_view(self, index):
         self.stack.setCurrentIndex(index)
@@ -669,10 +699,11 @@ class MainWindow(QMainWindow):
             print("[WARNING] Invalid PID input values.")
             
     def reset_data(self):
-        self.history = {"time": [], "pos": [], "setpoint": [], "error": []}
+        self.history = {"time": [], "pos": [], "setpoint": [], "error": [], "control": []}
         self.start_time = time.time()
         self.curve_pos.setData([], [])
         self.curve_sp.setData([], [])
+        self.curve_ctrl.setData([], [])
         
     def export_csv(self):
         if not self.history["time"]:
@@ -681,20 +712,23 @@ class MainWindow(QMainWindow):
         if path:
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["time_s", "position_cm", "setpoint_cm", "error_cm"])
+                writer.writerow(["time_s", "position_cm", "setpoint_cm", "error_cm", "control_signal_v"])
                 for i in range(len(self.history["time"])):
                     writer.writerow([
                         self.history["time"][i],
                         self.history["pos"][i],
                         self.history["setpoint"][i],
-                        self.history["error"][i]
+                        self.history["error"][i],
+                        self.history["control"][i],
                     ])
             print(f"[ACTION] Data exported to {path}")
 
     def update_simulation(self):
-        pos, sp, err = self.serialArduino.receive_command()
+        pos, sp, err, ctrl = self.serialArduino.receive_command()
         
-        self.pos_val_label.setText(f"{pos:.1f}cm")
+        # Always update live indicators
+        self.pos_val_label.setText(f"{pos:.1f} cm")
+        self.ctrl_val_label.setText(f"{ctrl:.2f} V")
         self.pos_marker.setData(x=[pos], y=[0])
         self.sp_line.setValue(sp)
         
@@ -707,16 +741,18 @@ class MainWindow(QMainWindow):
         self.history["pos"].append(pos)
         self.history["setpoint"].append(sp)
         self.history["error"].append(err)
+        self.history["control"].append(ctrl)
         
         self.curve_pos.setData(self.history["time"], self.history["pos"])
         self.curve_sp.setData(self.history["time"], self.history["setpoint"])
+        self.curve_ctrl.setData(self.history["time"], self.history["control"])
         
         if self.sliding_window_enabled:
             window_size = 10
-            if t > window_size:
-                self.plot_super.setXRange(t - window_size, t)
-            else:
-                self.plot_super.setXRange(0, window_size)
+            x_min = max(0, t - window_size)
+            x_max = x_min + window_size
+            self.plot_super.setXRange(x_min, x_max)
+            self.plot_ctrl.setXRange(x_min, x_max)
 
 
 if __name__ == "__main__":
