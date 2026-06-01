@@ -189,7 +189,7 @@ class ArduinoController:
         self.ser = None
         self.baudrate = baudrate
         self.setpoint = INITIAL_SETPOINT
-        self.p, self.i, self.d = 12.5, 0.85, 2.1
+        self.p, self.i, self.d = 6.0, 1.0, 0.0
         self.last_pos = 0.0
         self.last_control = 0.0  # Sinal de controle U em Volts (0–5V)
 
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow):
         self.plot_ctrl = pg.PlotWidget()
         self.plot_ctrl.setBackground(None)
         self.plot_ctrl.showGrid(x=True, y=True, alpha=0.1)
-        self.plot_ctrl.setYRange(0, 5)
+        self.plot_ctrl.setYRange(0, 10)
         self.plot_ctrl.getAxis('left').setLabel("Tensão", units="V")
         self.plot_ctrl.getAxis('bottom').setLabel("Tempo", units="s")
         # Horizontal reference lines at 0 V and 5 V
