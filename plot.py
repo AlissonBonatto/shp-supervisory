@@ -25,4 +25,4 @@ def plot_system_data(file_path, percentage):
     plt.show()
 
 # Example usage:
-plot_system_data('./ensaios/Ensaio3.csv', 0.8)
+plot_system_data('./teste.csv', 0.8)

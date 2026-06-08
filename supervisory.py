@@ -16,11 +16,12 @@ import pyqtgraph as pg
 import serial
 import serial.tools.list_ports
 
-INITIAL_SETPOINT = 12.5
-
+INITIAL_SETPOINT = 0
 _KP = 6.0
 _KI = 1.5
 _KD = 0
+PEGAR_PECA_POSITION = 12.5
+LARGAR_PECA_POSITION = 0.0
 
 # --- Sophisticated Dark Theme Constants ---
 BG_DEEP = "#0a0a0c"
@@ -62,7 +63,7 @@ QPushButton {{
     color: {TEXT_SECONDARY};
     padding: 12px 24px;
     text-align: left;
-    font-size: 15px; /* Fonte Maior */
+    font-size: 15px;
     font-weight: 500;
     border-left: 3px solid transparent;
 }}
@@ -145,7 +146,7 @@ QPushButton#BigActionBtn {{
     border: 2px solid {BORDER};
     border-radius: 10px;
     color: {TEXT_PRIMARY};
-    font-size: 18px; /* Botões de operação maiores */
+    font-size: 18px;
     font-weight: bold;
     padding: 24px;
     text-align: center;
@@ -165,9 +166,9 @@ QLineEdit {{
     border: 1px solid {BORDER};
     border-radius: 4px;
     padding: 8px;
-    color: {TEXT_PRIMARY}; /* Corrigido para acompanhar o tema! */
+    color: {TEXT_PRIMARY}; 
     font-family: 'JetBrains Mono', monospace;
-    font-size: 15px; /* Fonte maior */
+    font-size: 15px; 
 }}
 
 QSlider::groove:horizontal {{
@@ -226,7 +227,6 @@ QProgressBar::chunk {{
 }}
 """
 
-# --- Mapping para Alternância de Temas ---
 THEME_COLORS = {
     "dark": {
         "BG_DEEP": "#0a0a0c",
@@ -238,11 +238,7 @@ THEME_COLORS = {
         "ACCENT_AMBER": "#ffab00",
         "TEXT_PRIMARY": "#f0f0f5",
         "TEXT_SECONDARY": "#8e8e99",
-        "BORDER": "#2d2d35",
-        "RGBA_CYAN_05": "rgba(0, 242, 255, 0.05)",
-        "RGBA_CYAN_10": "rgba(0, 242, 255, 0.1)",
-        "RGBA_WHITE_02": "rgba(255, 255, 255, 0.02)",
-        "RGBA_WHITE_03": "rgba(255, 255, 255, 0.03)"
+        "BORDER": "#2d2d35"
     },
     "light": {
         "BG_DEEP": "#f0f0f5",
@@ -254,11 +250,7 @@ THEME_COLORS = {
         "ACCENT_AMBER": "#ff9500",
         "TEXT_PRIMARY": "#1c1c21",
         "TEXT_SECONDARY": "#6e6e73",
-        "BORDER": "#d2d2d7",
-        "RGBA_CYAN_05": "rgba(0, 122, 255, 0.08)",
-        "RGBA_CYAN_10": "rgba(0, 122, 255, 0.15)",
-        "RGBA_WHITE_02": "rgba(0, 0, 0, 0.04)",
-        "RGBA_WHITE_03": "rgba(0, 0, 0, 0.06)"
+        "BORDER": "#d2d2d7"
     }
 }
 
@@ -271,10 +263,11 @@ class ArduinoController:
         self.last_pos = 0.0
         self.last_control = 0.0
         self.sync_marker = b'\xaa\xaa'
+        self.serial_buffer = bytearray() 
 
-    def connect(self, porta):
+    def connect(self, port_name):
         try:
-            self.ser = serial.Serial(porta, self.baudrate, timeout=0.1)
+            self.ser = serial.Serial(port_name, self.baudrate, timeout=0.1)
             line = ""
             timeout_start = time.time()
             
@@ -285,11 +278,11 @@ class ArduinoController:
                 if raw:
                     line = raw.decode('utf-8', errors='ignore').strip()
             
-            print(f"Arduino connected on {porta}!")
+            print(f"Arduino connected on {port_name}!")
             self.send_command()
             return True
         except Exception as e:
-            print(f"Error on port {porta}: {e}")
+            print(f"Error on port {port_name}: {e}")
             return False
 
     def disconnect(self):
@@ -297,6 +290,7 @@ class ArduinoController:
             if self.ser and self.ser.is_open:
                 self.ser.close()
                 self.ser = None
+                self.serial_buffer.clear()
                 print("Arduino disconnected.")
                 return True
         except Exception as e:
@@ -320,51 +314,63 @@ class ArduinoController:
     def receive_command(self):
         times, positions, controls = [], [], []
         
-        if self.ser and self.ser.is_open:
-            while self.ser.in_waiting >= 2:
-                marker = self.ser.read(2)
+        if not (self.ser and self.ser.is_open):
+            return times, positions, controls
+            
+        try:
+            if self.ser.in_waiting > 0:
+                self.serial_buffer.extend(self.ser.read(self.ser.in_waiting))
+        except Exception as e:
+            print(f"Serial read error: {e}")
+            return times, positions, controls
+            
+        while len(self.serial_buffer) >= 4:
+            sync_idx = self.serial_buffer.find(self.sync_marker)
+            
+            if sync_idx == -1:
+                self.serial_buffer = self.serial_buffer[-1:]
+                break
                 
-                if marker == self.sync_marker:
-                    head_data = self.ser.read(2)
-                    if len(head_data) < 2:
-                        break
-                        
-                    buffer_head = struct.unpack('<H', head_data)[0]
-                    
-                    if buffer_head == 0 or buffer_head > 100:
-                        continue
-
-                    expected_bytes = buffer_head * 12
-                    
-                    timeout = time.time()
-                    while self.ser.in_waiting < expected_bytes:
-                        if time.time() - timeout > 0.1:
-                            break
-                            
-                    if self.ser.in_waiting >= expected_bytes:
-                        payload = self.ser.read(expected_bytes)
-                        
-                        time_format = f'<{buffer_head}L'
-                        times_batch = struct.unpack_from(time_format, payload, 0)
-                        
-                        pos_offset = buffer_head * 4
-                        pos_format = f'<{buffer_head}f'
-                        pos_batch = struct.unpack_from(pos_format, payload, pos_offset)
-                        
-                        ctrl_offset = pos_offset + (buffer_head * 4)
-                        ctrl_format = f'<{buffer_head}f'
-                        ctrl_batch = struct.unpack_from(ctrl_format, payload, ctrl_offset)
-                        
-                        times.extend(times_batch)
-                        positions.extend(pos_batch)
-                        controls.extend(ctrl_batch)
-                        
-                        if len(positions) > 0:
-                            self.last_pos = positions[-1]
-                            self.last_control = controls[-1]
-                else:
-                    self.ser.read(1)
-                    
+            if sync_idx > 0:
+                self.serial_buffer = self.serial_buffer[sync_idx:]
+                
+            if len(self.serial_buffer) < 4:
+                break 
+                
+            buffer_head = struct.unpack('<H', self.serial_buffer[2:4])[0]
+            
+            if buffer_head == 0 or buffer_head > 100:
+                self.serial_buffer = self.serial_buffer[2:]
+                continue
+                
+            expected_payload_bytes = buffer_head * 12
+            total_packet_size = 4 + expected_payload_bytes
+            
+            if len(self.serial_buffer) < total_packet_size:
+                break 
+                
+            payload = self.serial_buffer[4:total_packet_size]
+            self.serial_buffer = self.serial_buffer[total_packet_size:]
+            
+            time_format = f'<{buffer_head}L'
+            times_batch = struct.unpack_from(time_format, payload, 0)
+            
+            pos_offset = buffer_head * 4
+            pos_format = f'<{buffer_head}f'
+            pos_batch = struct.unpack_from(pos_format, payload, pos_offset)
+            
+            ctrl_offset = pos_offset + (buffer_head * 4)
+            ctrl_format = f'<{buffer_head}f'
+            ctrl_batch = struct.unpack_from(ctrl_format, payload, ctrl_offset)
+            
+            times.extend(times_batch)
+            positions.extend(pos_batch)
+            controls.extend(ctrl_batch)
+            
+        if positions:
+            self.last_pos = positions[-1]
+            self.last_control = controls[-1]
+            
         return times, positions, controls
     
 class MainWindow(QMainWindow):
@@ -385,7 +391,6 @@ class MainWindow(QMainWindow):
         self.cycle_timer.timeout.connect(self.cycle_tick)
         self.cycle_elapsed = 0
         
-        # Configuração de estilo de fontes para os gráficos (Usado nas abas)
         self.axis_label_style = {'font-size': '15px', 'font-weight': 'bold'}
         self.tick_font = QFont()
         self.tick_font.setPixelSize(13)
@@ -394,7 +399,7 @@ class MainWindow(QMainWindow):
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_simulation)
-        self.timer.start(15) 
+        self.timer.start(33) 
         
     def init_ui(self):
         main_widget = QWidget()
@@ -574,6 +579,9 @@ class MainWindow(QMainWindow):
         self.plot_super = pg.PlotWidget()
         self.plot_super.setBackground(BG_CARD)
         self.plot_super.showGrid(x=True, y=True, alpha=0.1)
+        self.plot_super.setClipToView(True)
+        self.plot_super.setDownsampling(mode='peak', auto=True)
+        
         self.plot_super.setYRange(0, 25)
         self.plot_super.getAxis('left').setLabel("Posição", units="cm", **self.axis_label_style)
         self.plot_super.getAxis('bottom').setLabel("Tempo", units="s", **self.axis_label_style)
@@ -591,6 +599,9 @@ class MainWindow(QMainWindow):
         self.plot_ctrl = pg.PlotWidget()
         self.plot_ctrl.setBackground(BG_CARD)
         self.plot_ctrl.showGrid(x=True, y=True, alpha=0.1)
+        self.plot_ctrl.setClipToView(True)
+        self.plot_ctrl.setDownsampling(mode='peak', auto=True)
+        
         self.plot_ctrl.setYRange(0, 10)
         self.plot_ctrl.getAxis('left').setLabel("Tensão", units="V", **self.axis_label_style)
         self.plot_ctrl.getAxis('bottom').setLabel("Tempo", units="s", **self.axis_label_style)
@@ -631,7 +642,7 @@ class MainWindow(QMainWindow):
 
         self.btn_largar = QPushButton("⬆ LARGAR PEÇA")
         self.btn_largar.setObjectName("BigActionBtn")
-        self.btn_largar.setEnabled(False) # Inativo no início
+        self.btn_largar.setEnabled(False) 
         self.btn_largar.clicked.connect(self.action_largar)
         actions_layout.addWidget(self.btn_largar, 1)
 
@@ -655,7 +666,6 @@ class MainWindow(QMainWindow):
 
         # --- Gráficos Inferiores ---
         graph_header = QHBoxLayout()
-        # DESTAQUE AQUI para a solicitação:
         graph_header.addWidget(QLabel("MONITORAMENTO DE DADOS", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 15px; font-weight: bold; letter-spacing: 1px;"))
         self.window_toggle_op = QPushButton("JANELA DESLIZANTE: ON")
         self.window_toggle_op.setStyleSheet(f"color: {ACCENT_CYAN}; font-size: 12px; font-weight: bold; border: 1px solid {BORDER}; padding: 6px;")
@@ -671,6 +681,9 @@ class MainWindow(QMainWindow):
         self.plot_op_pos_widget = pg.PlotWidget()
         self.plot_op_pos_widget.setBackground(BG_CARD)
         self.plot_op_pos_widget.showGrid(x=True, y=True, alpha=0.1)
+        self.plot_op_pos_widget.setClipToView(True)
+        self.plot_op_pos_widget.setDownsampling(mode='peak', auto=True)
+        
         self.plot_op_pos_widget.setYRange(0, 25)
         self.plot_op_pos_widget.getAxis('left').setLabel("Posição", units="cm", **self.axis_label_style)
         self.plot_op_pos_widget.getAxis('bottom').setLabel("Tempo", units="s", **self.axis_label_style)
@@ -684,6 +697,9 @@ class MainWindow(QMainWindow):
         self.plot_op_err_widget = pg.PlotWidget()
         self.plot_op_err_widget.setBackground(BG_CARD)
         self.plot_op_err_widget.showGrid(x=True, y=True, alpha=0.1)
+        self.plot_op_err_widget.setClipToView(True)
+        self.plot_op_err_widget.setDownsampling(mode='peak', auto=True)
+        
         self.plot_op_err_widget.setYRange(-25, 25)
         self.plot_op_err_widget.getAxis('left').setLabel("Erro", units="cm", **self.axis_label_style)
         self.plot_op_err_widget.getAxis('bottom').setLabel("Tempo", units="s", **self.axis_label_style)
@@ -775,27 +791,26 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(view)
         self.refresh_ports()
 
-    # --- Lógica do Menu Operação ---
-    def update_setpoint_globally(self, val):
-        self.serialArduino.setpoint = float(val)
-        self.sp_input.setText(str(float(val)))
-        self.sp_slider.setValue(int(val))
+    def update_setpoint_globally(self, target_value):
+        self.serialArduino.setpoint = float(target_value)
+        self.sp_input.setText(str(float(target_value)))
+        self.sp_slider.setValue(int(target_value))
         self.serialArduino.send_command()
 
     def action_pegar(self):
-        self.update_setpoint_globally(20.0)
+        self.update_setpoint_globally(PEGAR_PECA_POSITION)
         self.btn_pegar.setEnabled(False)
         self.btn_ciclo.setEnabled(False)
         self.btn_largar.setEnabled(True)
 
     def action_largar(self):
-        self.update_setpoint_globally(0.0)
+        self.update_setpoint_globally(LARGAR_PECA_POSITION)
         self.btn_pegar.setEnabled(True)
         self.btn_ciclo.setEnabled(True)
         self.btn_largar.setEnabled(False)
 
     def action_ciclo(self):
-        self.update_setpoint_globally(20.0)
+        self.update_setpoint_globally(PEGAR_PECA_POSITION)
         self.btn_pegar.setEnabled(False)
         self.btn_largar.setEnabled(False)
         self.btn_ciclo.setEnabled(False)
@@ -816,7 +831,6 @@ class MainWindow(QMainWindow):
             self.btn_ciclo.setEnabled(True)
             self.btn_largar.setEnabled(False)
             
-    # --- Continuação Funções do Sistema ---
     def toggle_theme(self):
         global BG_DEEP, BG_PANEL, BG_CARD, ACCENT_CYAN, ACCENT_ROSE, ACCENT_GREEN, ACCENT_AMBER, TEXT_PRIMARY, TEXT_SECONDARY, BORDER
         
@@ -971,8 +985,8 @@ class MainWindow(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
             
-    def on_slider_change(self, value):
-        self.sp_input.setText(str(float(value)))
+    def on_slider_change(self, slider_value):
+        self.sp_input.setText(str(float(slider_value)))
         
     def on_send_setpoint(self):
         try:
@@ -1022,6 +1036,23 @@ class MainWindow(QMainWindow):
                     ])
             print(f"[ACTION] Data exported to {path}")
 
+    # Helper function for high performance block averaging using C-backed NumPy
+    def _block_average(self, data_list, limit, factor):
+        if not data_list:
+            return np.array([])
+            
+        arr = np.array(data_list[-limit:])
+        
+        # Array size must be a perfect multiple of factor to reshape cleanly
+        remainder = len(arr) % factor
+        if remainder != 0:
+            arr = arr[remainder:]
+            
+        if len(arr) == 0:
+            return np.array([])
+            
+        return arr.reshape(-1, factor).mean(axis=1)
+
     def update_simulation(self):
         times, positions, controls = self.serialArduino.receive_command()
         
@@ -1040,6 +1071,7 @@ class MainWindow(QMainWindow):
         if not self.is_running:
             return
 
+        # Core logic stays untouched: the CSV exporter relies on self.history containing raw 500Hz data
         for i in range(len(times)):
             t_ms = times[i]
             
@@ -1055,13 +1087,23 @@ class MainWindow(QMainWindow):
             self.history["error"].append(error)
             self.history["control"].append(controls[i])
         
-        self.curve_pos.setData(self.history["time"], self.history["pos"])
-        self.curve_sp.setData(self.history["time"], self.history["setpoint"])
-        self.curve_ctrl.setData(self.history["time"], self.history["control"])
+        PLOT_LIMIT = 10000 
+        DOWNSAMPLE_FACTOR = 10  # Averages blocks of 10 points into 1 single point for the plot
         
-        self.curve_op_pos.setData(self.history["time"], self.history["pos"])
-        self.curve_op_sp.setData(self.history["time"], self.history["setpoint"])
-        self.curve_op_err.setData(self.history["time"], self.history["error"])
+        if len(self.history["time"]) >= DOWNSAMPLE_FACTOR:
+            plot_time = self._block_average(self.history["time"], PLOT_LIMIT, DOWNSAMPLE_FACTOR)
+            plot_pos  = self._block_average(self.history["pos"], PLOT_LIMIT, DOWNSAMPLE_FACTOR)
+            plot_sp   = self._block_average(self.history["setpoint"], PLOT_LIMIT, DOWNSAMPLE_FACTOR)
+            plot_ctrl = self._block_average(self.history["control"], PLOT_LIMIT, DOWNSAMPLE_FACTOR)
+            plot_err  = self._block_average(self.history["error"], PLOT_LIMIT, DOWNSAMPLE_FACTOR)
+            
+            self.curve_pos.setData(plot_time, plot_pos)
+            self.curve_sp.setData(plot_time, plot_sp)
+            self.curve_ctrl.setData(plot_time, plot_ctrl)
+            
+            self.curve_op_pos.setData(plot_time, plot_pos)
+            self.curve_op_sp.setData(plot_time, plot_sp)
+            self.curve_op_err.setData(plot_time, plot_err)
         
         if self.sliding_window_enabled and len(self.history["time"]) > 0:
             window_size = 10
@@ -1073,7 +1115,6 @@ class MainWindow(QMainWindow):
             self.plot_ctrl.setXRange(x_min, x_max)
             self.plot_op_pos_widget.setXRange(x_min, x_max)
             self.plot_op_err_widget.setXRange(x_min, x_max)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

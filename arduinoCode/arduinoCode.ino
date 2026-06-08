@@ -20,8 +20,13 @@ float controlSignalV = 0.0;
 // PID specific variables
 float integralError = 0.0;
 float previousError = 0.0;
-unsigned long previousTime = 0;
+unsigned long previousTimeMicros = 0;
 float pidOutput = 0.0; // Value to be written to PWM (0-255)
+
+// Oversampling accumulators
+float sumPos = 0.0;
+float sumCtrl = 0.0;
+unsigned int sampleCount = 0;
 
 // Buffer arrays
 unsigned long timeBuffer[BUFFER_SIZE];
@@ -50,7 +55,8 @@ void setup() {
   Serial.begin(500000);
   Serial.println("System ready.");
   
-  previousTime = millis();
+  // Use micros() for precision in PID loop
+  previousTimeMicros = micros();
 }
 
 void loop() {
@@ -62,18 +68,28 @@ void loop() {
   analogWrite(PWM_PIN, (int)pidOutput + 127);
   updateControlSignal(); 
 
+  // Accumulate samples continuously
+  sumPos += sensorPosition;
+  sumCtrl += controlSignalV;
+  sampleCount++;
+
   unsigned long currentMillis = millis();
 
-  // Accumulate data at a fixed frequency to prevent SRAM overflow
+  // Save averaged data to buffer at fixed frequency
   if (currentMillis - lastTelemetryTime >= TELEMETRY_INTERVAL) {
     lastTelemetryTime = currentMillis;
     
-    if (bufferHead < BUFFER_SIZE) {
+    if (bufferHead < BUFFER_SIZE && sampleCount > 0) {
       timeBuffer[bufferHead] = currentMillis;
-      posBuffer[bufferHead] = sensorPosition;
-      ctrlBuffer[bufferHead] = controlSignalV;
+      posBuffer[bufferHead] = sumPos / sampleCount;
+      ctrlBuffer[bufferHead] = sumCtrl / sampleCount;
       bufferHead++;
     }
+
+    // Reset accumulators for the next interval
+    sumPos = 0.0;
+    sumCtrl = 0.0;
+    sampleCount = 0;
   }
 
   // Send the entire block every 100ms
@@ -84,10 +100,12 @@ void loop() {
 }
 
 void updatePID() {
-  unsigned long currentTime = millis();
-  float dt = (float)(currentTime - previousTime) / 1000.0;
+  // Using micros() prevents dt dropping to 0 in fast control loops
+  unsigned long currentMicros = micros();
+  float dt = (float)(currentMicros - previousTimeMicros) / 1000000.0;
 
-  if (dt <= 0.0) return; 
+  // Safeguard against division by zero or negative time
+  if (dt <= 0.00001) return; 
 
   float error = targetSetpoint - sensorPosition;
 
@@ -104,7 +122,7 @@ void updatePID() {
   if (pidOutput < -127)   pidOutput = -127;
 
   previousError = error;
-  previousTime = currentTime;
+  previousTimeMicros = currentMicros;
 }
 
 void updateSensorPosition() {
