@@ -4,12 +4,17 @@
 #define CONTROL_READ_PIN A0
 #define BLINK_COUNT 3
 
+// Telemetry and buffer definitions
+#define TELEMETRY_INTERVAL 2  // 2ms = 500Hz sampling rate for the buffer
+#define BLOCK_INTERVAL 100    // 100ms block accumulation time
+#define BUFFER_SIZE 70        // 50 samples expected in 100ms, 70 provides a safe margin
+
 // Control values
 float targetSetpoint = 0.0;
-float kp = 6.0;
+float kp = 0.0;
 float ki = 0.0;
 float kd = 0.0;
-float sensorPosition = 12.5;
+float sensorPosition = 0.0;
 float controlSignalV = 0.0; 
 
 // PID specific variables
@@ -17,6 +22,14 @@ float integralError = 0.0;
 float previousError = 0.0;
 unsigned long previousTime = 0;
 float pidOutput = 0.0; // Value to be written to PWM (0-255)
+
+// Buffer arrays
+unsigned long timeBuffer[BUFFER_SIZE];
+float posBuffer[BUFFER_SIZE];
+float ctrlBuffer[BUFFER_SIZE];
+int bufferHead = 0;
+unsigned long lastTelemetryTime = 0;
+unsigned long lastBlockSendTime = 0;
 
 // Serial incoming data
 String incomingData = "";
@@ -33,7 +46,8 @@ void setup() {
   pinMode(SENSOR_PIN, INPUT);
   pinMode(CONTROL_READ_PIN, INPUT);
 
-  Serial.begin(9600);
+  // High baud rate is mandatory to flush the 100ms data block without freezing the PID
+  Serial.begin(500000);
   Serial.println("System ready.");
   
   previousTime = millis();
@@ -42,64 +56,67 @@ void setup() {
 void loop() {
   serialRoutine();
 
-  // Read sensor FIRST to get the most recent process variable
+  // Control loop runs as fast as the hardware allows
   updateSensorPosition();
-  
-  // Calculate PID response based on the new sensor reading
   updatePID();
-  
-  // Send the calculated output to the actuator
   analogWrite(PWM_PIN, (int)pidOutput + 127);
-
-  // Read the control signal on A0
   updateControlSignal(); 
+
+  unsigned long currentMillis = millis();
+
+  // Accumulate data at a fixed frequency to prevent SRAM overflow
+  if (currentMillis - lastTelemetryTime >= TELEMETRY_INTERVAL) {
+    lastTelemetryTime = currentMillis;
+    
+    if (bufferHead < BUFFER_SIZE) {
+      timeBuffer[bufferHead] = currentMillis;
+      posBuffer[bufferHead] = sensorPosition;
+      ctrlBuffer[bufferHead] = controlSignalV;
+      bufferHead++;
+    }
+  }
+
+  // Send the entire block every 100ms
+  if (currentMillis - lastBlockSendTime >= BLOCK_INTERVAL) {
+    lastBlockSendTime = currentMillis;
+    sendTelemetryBlock();
+  }
 }
 
 void updatePID() {
   unsigned long currentTime = millis();
-  float dt = (float)(currentTime - previousTime)/1000;
+  float dt = (float)(currentTime - previousTime) / 1000.0;
 
-  // Prevent division by zero or unnecessary calculations if time hasn't passed
   if (dt <= 0.0) return; 
 
-  // Calculate current error
   float error = targetSetpoint - sensorPosition;
 
-  // Proportional term
   float pTerm = kp * error;
 
-  // Integral term
   integralError += error * dt;
   float iTerm = ki * integralError;
 
-  // Derivative term
   float dTerm = kd * (error - previousError) / dt;
 
-  // Calculate final PID control signal
   pidOutput = pTerm + iTerm + dTerm;
 
-  // Constrain output to valid 8-bit PWM limits (0 to 255)
   if (pidOutput > 127) pidOutput = 127;
   if (pidOutput < -127)   pidOutput = -127;
 
-  // Store current values for the next iteration
   previousError = error;
   previousTime = currentTime;
 }
 
-// Updates global variable sensorPosition based on analogRead on SENSOR_PIN
 void updateSensorPosition() {
-  int sensorValue = analogRead(SENSOR_PIN);                            // 0-1023
-  sensorPosition = (float) map(sensorValue, 0, 1023, 0, 2500) / 100.0; // 0-25 cm
+  int sensorValue = analogRead(SENSOR_PIN);                                  // 0-1023
+  sensorPosition = (float) map(sensorValue, 0, 1023, 0, 2500) / 100.0;       // 0-25 cm
 }
 
-// Reads the control signal from CONTROL_READ_PIN and converts to Volts (0-5 V)
 void updateControlSignal() {
   int rawValue = analogRead(CONTROL_READ_PIN);         // 0-1023
   controlSignalV = (float)rawValue * 5.0 / 1023.0;     // 0.0-5.0 V
 }
 
-// Receives and sends data through serial port
 void serialRoutine() {
   if (Serial.available() > 0) {
     incomingData = Serial.readStringUntil('\n');
@@ -107,17 +124,25 @@ void serialRoutine() {
       startBlinking();
     }
   }
-
-  // Sends position (Y) and control signal (U) in the format "Y:<val>;U:<val>"
-  Serial.print("Y:");
-  Serial.print(sensorPosition, 2);
-  Serial.print(";U:");
-  Serial.println(controlSignalV * 2.0, 3);
-
   updateBlink();
 }
 
-// Parses incoming packet, updating setpoint and PID gains
+void sendTelemetryBlock() {
+  if (bufferHead == 0) return;
+
+  // Send a 2-byte synchronization marker (0xAAAA) and the payload size
+  const uint16_t syncMarker = 0xAAAA;
+  Serial.write((uint8_t*)&syncMarker, sizeof(syncMarker));
+  Serial.write((uint8_t*)&bufferHead, sizeof(bufferHead));
+
+  // Bulk write memory arrays directly to hardware serial buffer
+  Serial.write((uint8_t*)timeBuffer, bufferHead * sizeof(unsigned long));
+  Serial.write((uint8_t*)posBuffer, bufferHead * sizeof(float));
+  Serial.write((uint8_t*)ctrlBuffer, bufferHead * sizeof(float));
+
+  bufferHead = 0;
+}
+
 bool parseIncomingPacket(String packet) {
   int indexSP = packet.indexOf("SP:");
   int indexP  = packet.indexOf(";P:");
@@ -136,7 +161,6 @@ bool parseIncomingPacket(String packet) {
   return true;
 }
 
-// Blinks led - debug purposes
 void startBlinking() {
   if (!isBlinking) {
     isBlinking = true;
