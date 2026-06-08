@@ -824,7 +824,7 @@ class MainWindow(QMainWindow):
         self.progress_ciclo.setValue(self.cycle_elapsed)
         if self.cycle_elapsed >= 6000:
             self.cycle_timer.stop()
-            self.update_setpoint_globally(0.0)
+            self.update_setpoint_globally(LARGAR_PECA_POSITION)
             self.progress_ciclo.setValue(0)
             
             self.btn_pegar.setEnabled(True)
