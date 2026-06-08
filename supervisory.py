@@ -502,9 +502,9 @@ class MainWindow(QMainWindow):
         pid_layout = QVBoxLayout(pid_card)
         pid_layout.addWidget(QLabel("PARÂMETROS PID", styleSheet=f"color: {TEXT_SECONDARY}; font-size: 13px; font-weight: bold;"))
         pid_layout.addSpacing(10)
-        self.kp_input = QLineEdit("12.5")
-        self.ki_input = QLineEdit("0.85")
-        self.kd_input = QLineEdit("2.1")
+        self.kp_input = QLineEdit(str(self.serialArduino.p))
+        self.ki_input = QLineEdit(str(self.serialArduino.i))
+        self.kd_input = QLineEdit(str(self.serialArduino.d))
         for label_text, input_widget in [("Kp", self.kp_input), ("Ki", self.ki_input), ("Kd", self.kd_input)]:
             pid_layout.addWidget(QLabel(label_text, styleSheet=f"color: {TEXT_SECONDARY}; font-size: 13px;"))
             pid_layout.addWidget(input_widget)
